@@ -314,6 +314,61 @@ export function formatDuration(seconds) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+const MAX_HTTP_THUMBNAIL_LENGTH = 2048;
+const MAX_DATA_THUMBNAIL_LENGTH = 40000;
+
+/**
+ * Validate and sanitize a thumbnail URL, allowing only safe http(s) URLs
+ * or bounded data:image/ URIs.
+ * @param {string|null|undefined} rawUrl
+ * @returns {string|null}
+ */
+export function sanitizeThumbnailUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || /[\u0000-\u001f]/.test(trimmed)) return null;
+
+  if (/^data:image\//i.test(trimmed)) {
+    if (trimmed.length > MAX_DATA_THUMBNAIL_LENGTH) return null;
+    if (!/^data:image\/[a-z0-9.+-]+(?:;[a-z0-9=+-]+)*,/i.test(trimmed)) return null;
+    return trimmed;
+  }
+
+  if (trimmed.length > MAX_HTTP_THUMBNAIL_LENGTH) return null;
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return trimmed;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+/**
+ * Select the highest-priority valid thumbnail URL for a detected media item.
+ * @param {object|null|undefined} item
+ * @param {object|null|undefined} tabMeta
+ * @returns {string|null}
+ */
+export function pickVideoThumbnail(item, tabMeta) {
+  const candidates = [
+    item?.poster,
+    item?.frameThumbnail,
+    tabMeta?.activeMeta?.poster,
+    tabMeta?.activeMeta?.frameThumbnail,
+    tabMeta?.pageThumbnail
+  ];
+  for (const candidate of candidates) {
+    const clean = sanitizeThumbnailUrl(candidate);
+    if (clean) return clean;
+  }
+  return null;
+}
+
 /**
  * Parse an attribute list from an HLS tag such as EXT-X-STREAM-INF or EXT-X-KEY.
  * @param {string} attrString

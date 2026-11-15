@@ -1,9 +1,11 @@
+import { initDevReloader, setDevReloadEnabled } from './dev-reloader.js';
 import {
   classifyMediaRequest,
   getDedupeKey,
   getNameFromUrl,
   parseM3u8,
-  sanitizeFilename
+  sanitizeFilename,
+  sanitizeThumbnailUrl
 } from './media-utils.js';
 
 const STORAGE_KEYS = {
@@ -15,8 +17,9 @@ const STORAGE_KEYS = {
 };
 
 const DEFAULT_SETTINGS = {
-  subfolder: 'Video Downloader',
-  saveAs: false
+  subfolder: 'FreeVideoDownloader',
+  saveAs: false,
+  autoReload: true
 };
 
 const MAX_ITEMS_PER_TAB = 40;
@@ -43,7 +46,50 @@ function getHeader(headers, name) {
 
 async function getSettings() {
   const data = await chrome.storage.local.get({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
-  return { ...DEFAULT_SETTINGS, ...data[STORAGE_KEYS.SETTINGS] };
+  const merged = { ...DEFAULT_SETTINGS, ...data[STORAGE_KEYS.SETTINGS] };
+  return {
+    ...merged,
+    autoReload: merged.autoReload !== false
+  };
+}
+
+function sanitizeActiveMeta(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  return {
+    ...meta,
+    poster: sanitizeThumbnailUrl(meta.poster),
+    frameThumbnail: sanitizeThumbnailUrl(meta.frameThumbnail)
+  };
+}
+
+function buildDomMediaItem(videoInfo, pageTitle) {
+  const classified = classifyMediaRequest({ url: videoInfo.url }) || {
+    kind: 'direct',
+    ext: 'mp4',
+    formatLabel: 'VIDEO',
+    mimeType: 'video/mp4',
+    sizeBytes: null,
+    dedupeKey: getDedupeKey(videoInfo.url)
+  };
+  return {
+    id: `${classified.kind}_${classified.dedupeKey}`,
+    url: videoInfo.url,
+    dedupeKey: classified.dedupeKey,
+    kind: classified.kind,
+    ext: classified.ext,
+    formatLabel: classified.formatLabel,
+    mimeType: classified.mimeType,
+    sizeBytes: videoInfo.sizeBytes ?? classified.sizeBytes,
+    width: videoInfo.width || 0,
+    height: videoInfo.height || 0,
+    duration: videoInfo.duration ?? null,
+    isPlaying: Boolean(videoInfo.isPlaying),
+    poster: sanitizeThumbnailUrl(videoInfo.poster),
+    frameThumbnail: sanitizeThumbnailUrl(videoInfo.frameThumbnail),
+    title: pageTitle || '',
+    source: 'dom',
+    detectedAt: Date.now()
+  };
 }
 
 async function updateBadge(tabId, count) {
@@ -86,10 +132,16 @@ async function upsertTabMedia(tabId, newItems, metaPatch = null) {
           height: item.height || prev.height,
           duration: item.duration ?? prev.duration,
           isPlaying: item.isPlaying ?? prev.isPlaying,
+          poster: sanitizeThumbnailUrl(item.poster) || prev.poster || null,
+          frameThumbnail: sanitizeThumbnailUrl(item.frameThumbnail) || prev.frameThumbnail || null,
           detectedAt: Math.max(prev.detectedAt || 0, item.detectedAt || 0)
         };
       } else {
-        list.unshift(item);
+        list.unshift({
+          ...item,
+          poster: sanitizeThumbnailUrl(item.poster) || null,
+          frameThumbnail: sanitizeThumbnailUrl(item.frameThumbnail) || null
+        });
       }
     }
 
@@ -100,7 +152,35 @@ async function upsertTabMedia(tabId, newItems, metaPatch = null) {
     allMedia[key] = list;
 
     if (metaPatch) {
-      allMeta[key] = { ...(allMeta[key] || {}), ...metaPatch };
+      const prevMeta = allMeta[key] || {};
+      const nextMeta = { ...prevMeta, ...metaPatch };
+
+      if (prevMeta.activeMeta || metaPatch.activeMeta) {
+        const prevActive = prevMeta.activeMeta || {};
+        const nextActive = metaPatch.activeMeta || {};
+        nextMeta.activeMeta = {
+          ...prevActive,
+          ...nextActive,
+          poster:
+            sanitizeThumbnailUrl(nextActive.poster) ||
+            sanitizeThumbnailUrl(prevActive.poster) ||
+            null,
+          frameThumbnail:
+            sanitizeThumbnailUrl(nextActive.frameThumbnail) ||
+            sanitizeThumbnailUrl(prevActive.frameThumbnail) ||
+            null
+        };
+      }
+
+      const cleanPageThumb =
+        sanitizeThumbnailUrl(metaPatch.pageThumbnail) ||
+        sanitizeThumbnailUrl(prevMeta.pageThumbnail) ||
+        null;
+      if (cleanPageThumb || 'pageThumbnail' in metaPatch || 'pageThumbnail' in prevMeta) {
+        nextMeta.pageThumbnail = cleanPageThumb;
+      }
+
+      allMeta[key] = nextMeta;
     }
 
     await chrome.storage.session.set({
@@ -231,7 +311,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === 'install') {
     await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
   }
+  initDevReloader().catch(() => {});
 });
+
+chrome.runtime.onStartup.addListener(() => {
+  initDevReloader().catch(() => {});
+});
+
+initDevReloader().catch(() => {});
 
 chrome.webRequest.onHeadersReceived.addListener(
   (details) => {
@@ -338,39 +425,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         const payload = message.payload || {};
-        const items = (payload.videos || []).map((v) => {
-          const classified = classifyMediaRequest({ url: v.url }) || {
-            kind: 'direct',
-            ext: 'mp4',
-            formatLabel: 'VIDEO',
-            mimeType: 'video/mp4',
-            sizeBytes: null,
-            dedupeKey: getDedupeKey(v.url)
-          };
-          return {
-            id: `${classified.kind}_${classified.dedupeKey}`,
-            url: v.url,
-            dedupeKey: classified.dedupeKey,
-            kind: classified.kind,
-            ext: classified.ext,
-            formatLabel: classified.formatLabel,
-            mimeType: classified.mimeType,
-            sizeBytes: classified.sizeBytes,
-            width: v.width || 0,
-            height: v.height || 0,
-            duration: v.duration ?? null,
-            isPlaying: Boolean(v.isPlaying),
-            poster: v.poster || null,
-            title: payload.pageTitle || '',
-            source: 'dom',
-            detectedAt: Date.now()
-          };
-        });
+        const items = (payload.videos || []).map((v) => buildDomMediaItem(v, payload.pageTitle));
 
         await upsertTabMedia(tabId, items, {
           pageTitle: payload.pageTitle || '',
+          pageThumbnail: sanitizeThumbnailUrl(payload.pageThumbnail),
           hasBlobVideo: Boolean(payload.hasBlobVideo),
-          activeMeta: payload.activeMeta || null,
+          activeMeta: sanitizeActiveMeta(payload.activeMeta),
           lastMainUrl: sender.tab?.url || undefined
         });
 
@@ -417,36 +478,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const p = frame?.result;
             if (!p) continue;
             if (p.pageTitle && !mergedMeta.pageTitle) mergedMeta.pageTitle = p.pageTitle;
+            const cleanPageThumbnail = sanitizeThumbnailUrl(p.pageThumbnail);
+            if (cleanPageThumbnail && !mergedMeta.pageThumbnail) {
+              mergedMeta.pageThumbnail = cleanPageThumbnail;
+            }
             if (p.hasBlobVideo) mergedMeta.hasBlobVideo = true;
-            if (p.activeMeta && !mergedMeta.activeMeta) mergedMeta.activeMeta = p.activeMeta;
+            if (p.activeMeta) {
+              const cleanActive = sanitizeActiveMeta(p.activeMeta);
+              if (!mergedMeta.activeMeta) {
+                mergedMeta.activeMeta = cleanActive;
+              } else if (cleanActive) {
+                mergedMeta.activeMeta = {
+                  ...mergedMeta.activeMeta,
+                  poster: mergedMeta.activeMeta.poster || cleanActive.poster || null,
+                  frameThumbnail:
+                    mergedMeta.activeMeta.frameThumbnail || cleanActive.frameThumbnail || null
+                };
+              }
+            }
 
             for (const v of p.videos || []) {
-              const classified = classifyMediaRequest({ url: v.url }) || {
-                kind: 'direct',
-                ext: 'mp4',
-                formatLabel: 'VIDEO',
-                mimeType: 'video/mp4',
-                sizeBytes: null,
-                dedupeKey: getDedupeKey(v.url)
-              };
-              mergedItems.push({
-                id: `${classified.kind}_${classified.dedupeKey}`,
-                url: v.url,
-                dedupeKey: classified.dedupeKey,
-                kind: classified.kind,
-                ext: classified.ext,
-                formatLabel: classified.formatLabel,
-                mimeType: classified.mimeType,
-                sizeBytes: v.sizeBytes ?? classified.sizeBytes,
-                width: v.width || 0,
-                height: v.height || 0,
-                duration: v.duration ?? null,
-                isPlaying: Boolean(v.isPlaying),
-                poster: v.poster || null,
-                title: p.pageTitle || '',
-                source: 'dom',
-                detectedAt: Date.now()
-              });
+              mergedItems.push(buildDomMediaItem(v, p.pageTitle));
             }
           }
 
@@ -509,9 +561,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case 'SAVE_SETTINGS': {
         const current = await getSettings();
-        const updated = { ...current, ...(message.settings || {}) };
-        await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: updated });
-        sendResponse({ ok: true, settings: updated });
+        const merged = { ...current, ...(message.settings || {}) };
+        const next = {
+          ...merged,
+          autoReload: merged.autoReload !== false
+        };
+        await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: next });
+        await setDevReloadEnabled(next.autoReload).catch(() => {});
+        sendResponse({ ok: true, settings: next });
         return;
       }
 

@@ -6,7 +6,9 @@ import {
   formatDuration,
   getDedupeKey,
   parseM3u8,
-  sanitizeFilename
+  pickVideoThumbnail,
+  sanitizeFilename,
+  sanitizeThumbnailUrl
 } from '../background/media-utils.js';
 
 test('classifyMediaRequest detects direct MP4 and parses 206 Content-Range size', () => {
@@ -161,4 +163,115 @@ test('formatBytes and formatDuration produce clean labels', () => {
   assert.equal(formatBytes(25 * 1024 * 1024), '25 MB');
   assert.equal(formatDuration(125), '2:05');
   assert.equal(formatDuration(3665), '1:01:05');
+});
+
+test('sanitizeThumbnailUrl accepts valid http(s) and data:image/ URLs and trims whitespace', () => {
+  assert.equal(
+    sanitizeThumbnailUrl('  https://cdn.example.com/thumb.jpg?w=320  '),
+    'https://cdn.example.com/thumb.jpg?w=320'
+  );
+  assert.equal(
+    sanitizeThumbnailUrl('http://cdn.example.com/poster.png'),
+    'http://cdn.example.com/poster.png'
+  );
+  const dataJpeg = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/';
+  assert.equal(sanitizeThumbnailUrl(` ${dataJpeg} `), dataJpeg);
+});
+
+test('sanitizeThumbnailUrl rejects unsafe schemes, invalid inputs, and oversized URLs', () => {
+  assert.equal(sanitizeThumbnailUrl('javascript:alert(1)'), null);
+  assert.equal(sanitizeThumbnailUrl('JAVASCRIPT:alert(1)'), null);
+  assert.equal(sanitizeThumbnailUrl('blob:https://example.com/1234-5678'), null);
+  assert.equal(sanitizeThumbnailUrl('data:text/html,<script>alert(1)</script>'), null);
+  assert.equal(sanitizeThumbnailUrl('file:///C:/secret.png'), null);
+  assert.equal(sanitizeThumbnailUrl('/relative/thumb.jpg'), null);
+  assert.equal(sanitizeThumbnailUrl(''), null);
+  assert.equal(sanitizeThumbnailUrl('   '), null);
+  assert.equal(sanitizeThumbnailUrl(null), null);
+  assert.equal(sanitizeThumbnailUrl(undefined), null);
+  assert.equal(sanitizeThumbnailUrl(12345), null);
+
+  const validHttpMax = `https://cdn.example.com/${'a'.repeat(2048 - 'https://cdn.example.com/'.length)}`;
+  assert.equal(validHttpMax.length, 2048);
+  assert.equal(sanitizeThumbnailUrl(validHttpMax), validHttpMax);
+  assert.equal(sanitizeThumbnailUrl(`${validHttpMax}x`), null);
+
+  const dataPrefix = 'data:image/jpeg;base64,';
+  const validDataMax = `${dataPrefix}${'A'.repeat(40000 - dataPrefix.length)}`;
+  assert.equal(validDataMax.length, 40000);
+  assert.equal(sanitizeThumbnailUrl(validDataMax), validDataMax);
+  assert.equal(sanitizeThumbnailUrl(`${validDataMax}A`), null);
+});
+
+test('pickVideoThumbnail follows priority order and skips unsafe/invalid candidates', () => {
+  const fullMeta = {
+    activeMeta: {
+      poster: 'https://cdn.example.com/active-poster.jpg',
+      frameThumbnail: 'data:image/jpeg;base64,ACTIVEFRAME'
+    },
+    pageThumbnail: 'https://cdn.example.com/og-image.jpg'
+  };
+
+  assert.equal(
+    pickVideoThumbnail(
+      {
+        poster: 'https://cdn.example.com/item-poster.jpg',
+        frameThumbnail: 'data:image/jpeg;base64,ITEMFRAME'
+      },
+      fullMeta
+    ),
+    'https://cdn.example.com/item-poster.jpg'
+  );
+
+  assert.equal(
+    pickVideoThumbnail(
+      {
+        poster: 'javascript:alert(1)',
+        frameThumbnail: 'data:image/jpeg;base64,ITEMFRAME'
+      },
+      fullMeta
+    ),
+    'data:image/jpeg;base64,ITEMFRAME'
+  );
+
+  assert.equal(
+    pickVideoThumbnail(
+      {
+        poster: null,
+        frameThumbnail: 'blob:https://example.com/frame'
+      },
+      fullMeta
+    ),
+    'https://cdn.example.com/active-poster.jpg'
+  );
+
+  assert.equal(
+    pickVideoThumbnail(
+      {},
+      {
+        activeMeta: {
+          poster: '',
+          frameThumbnail: 'data:image/jpeg;base64,ACTIVEFRAME'
+        },
+        pageThumbnail: 'https://cdn.example.com/og-image.jpg'
+      }
+    ),
+    'data:image/jpeg;base64,ACTIVEFRAME'
+  );
+
+  assert.equal(
+    pickVideoThumbnail(
+      {},
+      {
+        activeMeta: {
+          poster: null,
+          frameThumbnail: null
+        },
+        pageThumbnail: 'https://cdn.example.com/og-image.jpg'
+      }
+    ),
+    'https://cdn.example.com/og-image.jpg'
+  );
+
+  assert.equal(pickVideoThumbnail(null, null), null);
 });

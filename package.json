@@ -1,0 +1,9 @@
+{
+  "name": "free-video-downloader-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/media-utils.test.mjs",
+    "dev:reload": "node scripts/dev-reload-server.mjs"
+  }
+}
