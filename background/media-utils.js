@@ -314,6 +314,26 @@ export function formatDuration(seconds) {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/**
+ * Estimate HLS stream size in bytes from bitrate (bps) and duration (seconds).
+ * @param {number|null|undefined} bandwidthBps
+ * @param {number|null|undefined} durationSeconds
+ * @returns {number|null}
+ */
+export function estimateHlsBytes(bandwidthBps, durationSeconds) {
+  if (
+    typeof bandwidthBps !== 'number' ||
+    typeof durationSeconds !== 'number' ||
+    !Number.isFinite(bandwidthBps) ||
+    !Number.isFinite(durationSeconds) ||
+    bandwidthBps <= 0 ||
+    durationSeconds <= 0
+  ) {
+    return null;
+  }
+  return Math.round((bandwidthBps / 8) * durationSeconds);
+}
+
 const MAX_HTTP_THUMBNAIL_LENGTH = 2048;
 const MAX_DATA_THUMBNAIL_LENGTH = 40000;
 

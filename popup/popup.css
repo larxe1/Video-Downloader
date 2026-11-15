@@ -329,6 +329,18 @@ input {
   border-color: currentColor;
 }
 
+.badge-size {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  border-color: var(--border);
+}
+
+.badge-muted {
+  font-weight: 500;
+  color: var(--text-muted);
+  background-color: transparent;
+}
+
 .media-host {
   overflow: hidden;
   text-overflow: ellipsis;

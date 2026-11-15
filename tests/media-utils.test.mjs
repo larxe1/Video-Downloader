@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   classifyMediaRequest,
+  estimateHlsBytes,
   formatBytes,
   formatDuration,
   getDedupeKey,
@@ -274,4 +275,23 @@ test('pickVideoThumbnail follows priority order and skips unsafe/invalid candida
   );
 
   assert.equal(pickVideoThumbnail(null, null), null);
+});
+
+test('estimateHlsBytes computes rounded bytes for valid inputs and returns null for invalid inputs', () => {
+  assert.equal(estimateHlsBytes(800_000, 10), 1_000_000);
+  assert.equal(estimateHlsBytes(1_000_000, 3.5), 437_500);
+  assert.equal(estimateHlsBytes(500_001, 1), 62_500);
+
+  assert.equal(estimateHlsBytes(0, 10), null);
+  assert.equal(estimateHlsBytes(800_000, 0), null);
+  assert.equal(estimateHlsBytes(-800_000, 10), null);
+  assert.equal(estimateHlsBytes(800_000, -10), null);
+  assert.equal(estimateHlsBytes(null, 10), null);
+  assert.equal(estimateHlsBytes(800_000, null), null);
+  assert.equal(estimateHlsBytes(undefined, 10), null);
+  assert.equal(estimateHlsBytes(NaN, 10), null);
+  assert.equal(estimateHlsBytes(800_000, NaN), null);
+  assert.equal(estimateHlsBytes(Infinity, 10), null);
+  assert.equal(estimateHlsBytes(800_000, Infinity), null);
+  assert.equal(estimateHlsBytes('800000', 10), null);
 });

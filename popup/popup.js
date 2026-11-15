@@ -1,4 +1,5 @@
 import {
+  estimateHlsBytes,
   formatBytes,
   formatDuration,
   getNameFromUrl
@@ -270,8 +271,17 @@ function renderVariantsBox(container, item, title, parsed) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'btn btn-primary btn-sm variant-btn';
-      btn.textContent = `Download ${variant.qualityLabel}`;
-      btn.setAttribute('aria-label', `Download ${title} in ${variant.qualityLabel}`);
+      const est = formatBytes(
+        variant.estimatedSizeBytes || estimateHlsBytes(variant.bandwidth, parsed.totalDuration)
+      );
+      btn.textContent = `Download ${variant.qualityLabel}${est ? ` (~${est})` : ''}`;
+      btn.setAttribute(
+        'aria-label',
+        `Download ${title} in ${variant.qualityLabel}${est ? `, estimated ${est}` : ''}`
+      );
+      if (est) {
+        btn.title = 'Estimated size from stream bitrate and duration';
+      }
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         setStatus(`Starting ${variant.qualityLabel} stream download…`);
@@ -306,8 +316,13 @@ function renderVariantsBox(container, item, title, parsed) {
   const singleBtn = document.createElement('button');
   singleBtn.type = 'button';
   singleBtn.className = 'btn btn-primary btn-sm';
-  const durationStr = formatDuration(parsed.totalDuration);
-  singleBtn.textContent = `Download Stream${durationStr ? ` (${durationStr})` : ''}`;
+  const singleEst = formatBytes(item.estimatedSizeBytes || parsed.estimatedSizeBytes);
+  const durationStr = formatDuration(parsed.totalDuration || item.duration);
+  const singleDetails = [
+    durationStr,
+    singleEst ? `~${singleEst}` : (parsed.isLive || item.isLive ? 'Live' : '')
+  ].filter(Boolean);
+  singleBtn.textContent = `Download Stream${singleDetails.length > 0 ? ` (${singleDetails.join(' · ')})` : ''}`;
   singleBtn.addEventListener('click', async () => {
     singleBtn.disabled = true;
     const res = await chrome.runtime.sendMessage({
@@ -385,12 +400,21 @@ function renderVideos(tabState) {
       metaRow.appendChild(createBadge(`${activeWidth}px`));
     }
 
-    const sizeStr = formatBytes(item.sizeBytes);
-    if (sizeStr) {
-      metaRow.appendChild(createBadge(sizeStr));
+    const exactSize = formatBytes(item.sizeBytes);
+    const estSize = !exactSize ? formatBytes(item.estimatedSizeBytes) : '';
+    if (exactSize) {
+      metaRow.appendChild(createBadge(exactSize, 'badge-size'));
+    } else if (estSize) {
+      const b = createBadge(`~${estSize}`, 'badge-size');
+      b.title = 'Estimated size';
+      metaRow.appendChild(b);
+    } else if (item.isLive) {
+      metaRow.appendChild(createBadge('Live stream', 'badge-muted'));
+    } else {
+      metaRow.appendChild(createBadge('Size unknown', 'badge-muted'));
     }
 
-    const durationVal = item.duration ?? tabMeta.activeMeta?.duration;
+    const durationVal = item.duration || tabMeta.activeMeta?.duration;
     const durStr = formatDuration(durationVal);
     if (durStr) {
       metaRow.appendChild(createBadge(durStr));

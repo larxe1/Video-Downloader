@@ -1,8 +1,10 @@
 import { initDevReloader, setDevReloadEnabled } from './dev-reloader.js';
 import {
   classifyMediaRequest,
+  estimateHlsBytes,
   getDedupeKey,
   getNameFromUrl,
+  parseContentRangeTotal,
   parseM3u8,
   sanitizeFilename,
   sanitizeThumbnailUrl
@@ -128,10 +130,12 @@ async function upsertTabMedia(tabId, newItems, metaPatch = null) {
           ...item,
           title: item.title || prev.title,
           sizeBytes: item.sizeBytes ?? prev.sizeBytes,
+          estimatedSizeBytes: item.estimatedSizeBytes ?? prev.estimatedSizeBytes ?? null,
           width: item.width || prev.width,
           height: item.height || prev.height,
           duration: item.duration ?? prev.duration,
           isPlaying: item.isPlaying ?? prev.isPlaying,
+          isLive: item.isLive ?? prev.isLive ?? false,
           poster: sanitizeThumbnailUrl(item.poster) || prev.poster || null,
           frameThumbnail: sanitizeThumbnailUrl(item.frameThumbnail) || prev.frameThumbnail || null,
           detectedAt: Math.max(prev.detectedAt || 0, item.detectedAt || 0)
@@ -139,6 +143,8 @@ async function upsertTabMedia(tabId, newItems, metaPatch = null) {
       } else {
         list.unshift({
           ...item,
+          estimatedSizeBytes: item.estimatedSizeBytes ?? null,
+          isLive: item.isLive ?? false,
           poster: sanitizeThumbnailUrl(item.poster) || null,
           frameThumbnail: sanitizeThumbnailUrl(item.frameThumbnail) || null
         });
@@ -248,6 +254,171 @@ async function updateDownloadJob(jobId, patch) {
   });
 }
 
+const MAX_PROBED_URLS = 500;
+const probingUrls = new Set();
+
+function parseContentLengthHeader(headers) {
+  const raw = headers.get('content-length');
+  if (!raw) return null;
+  const val = Number(raw);
+  return Number.isFinite(val) && val > 0 ? val : null;
+}
+
+async function fetchM3u8(url) {
+  const res = await fetch(url, { credentials: 'include' });
+  if (!res.ok) return null;
+  const text = await res.text();
+  return parseM3u8(text, res.url || url);
+}
+
+async function probeDirectSize(url) {
+  try {
+    const headRes = await fetch(url, { method: 'HEAD', credentials: 'include' });
+    if (headRes.ok) {
+      const size =
+        parseContentRangeTotal(headRes.headers.get('content-range')) ??
+        parseContentLengthHeader(headRes.headers);
+      if (size !== null) return size;
+    }
+  } catch {
+    // Fall back to Range GET below
+  }
+
+  const controller = new AbortController();
+  try {
+    const rangeRes = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Range: 'bytes=0-0' },
+      signal: controller.signal
+    });
+    if (rangeRes.ok) {
+      const rangeTotal = parseContentRangeTotal(rangeRes.headers.get('content-range'));
+      if (rangeTotal !== null) return rangeTotal;
+      if (rangeRes.status === 200) {
+        return parseContentLengthHeader(rangeRes.headers);
+      }
+    }
+  } catch {
+    // Ignore probe errors
+  } finally {
+    controller.abort();
+  }
+
+  return null;
+}
+
+async function probeHlsMetadata(url) {
+  const parsed = await fetchM3u8(url);
+  if (!parsed) return null;
+
+  if (parsed.type === 'master' && parsed.variants.length > 0) {
+    const top = parsed.variants[0];
+    let estimatedSizeBytes = null;
+    let duration;
+    let isLive;
+
+    try {
+      const subParsed = await fetchM3u8(top.url);
+      if (subParsed && subParsed.type === 'media') {
+        isLive = Boolean(subParsed.isLive);
+        if (!subParsed.isLive) {
+          if (subParsed.totalDuration > 0) {
+            duration = subParsed.totalDuration;
+          }
+          estimatedSizeBytes = estimateHlsBytes(top.bandwidth, subParsed.totalDuration);
+        }
+      }
+    } catch {
+      // Variant fetch failed; still keep master dimensions if present
+    }
+
+    return {
+      estimatedSizeBytes,
+      duration,
+      isLive,
+      width: top.width || undefined,
+      height: top.height || undefined
+    };
+  }
+
+  if (parsed.type === 'media') {
+    const isLive = Boolean(parsed.isLive);
+    let estimatedSizeBytes = null;
+    const duration = !isLive && parsed.totalDuration > 0 ? parsed.totalDuration : undefined;
+
+    if (!isLive && parsed.segments.length > 0) {
+      const repSeg = parsed.segments[Math.floor(parsed.segments.length / 2)];
+      try {
+        const headRes = await fetch(repSeg.uri, { method: 'HEAD', credentials: 'include' });
+        if (headRes.ok) {
+          const segBytes = parseContentLengthHeader(headRes.headers);
+          if (segBytes !== null) {
+            estimatedSizeBytes = Math.round(segBytes * parsed.segments.length);
+          }
+        }
+      } catch {
+        // Ignore segment HEAD errors
+      }
+    }
+
+    return { estimatedSizeBytes, duration, isLive };
+  }
+
+  return null;
+}
+
+async function enrichItemSize(tabId, item) {
+  if (!item || !item.url || !item.dedupeKey) return;
+  if (typeof tabId !== 'number' || tabId < 0) return;
+
+  const needsDirect = item.kind === 'direct' && item.sizeBytes == null;
+  const needsHls = item.kind === 'hls' && item.sizeBytes == null && item.estimatedSizeBytes == null;
+  if (!needsDirect && !needsHls) return;
+
+  if (probingUrls.has(item.dedupeKey)) return;
+  if (probingUrls.size >= MAX_PROBED_URLS) {
+    const oldest = probingUrls.values().next().value;
+    probingUrls.delete(oldest);
+  }
+  probingUrls.add(item.dedupeKey);
+
+  try {
+    if (needsDirect) {
+      const sizeBytes = await probeDirectSize(item.url);
+      if (typeof sizeBytes === 'number' && Number.isFinite(sizeBytes) && sizeBytes > 0) {
+        await upsertTabMedia(tabId, [{ ...item, sizeBytes }]);
+      }
+      return;
+    }
+
+    if (needsHls) {
+      const meta = await probeHlsMetadata(item.url);
+      if (!meta) return;
+      const hasInfo =
+        meta.estimatedSizeBytes !== null ||
+        meta.duration !== undefined ||
+        meta.isLive !== undefined ||
+        meta.width !== undefined ||
+        meta.height !== undefined;
+      if (hasInfo) {
+        await upsertTabMedia(tabId, [
+          {
+            ...item,
+            estimatedSizeBytes: meta.estimatedSizeBytes ?? null,
+            duration: meta.duration,
+            isLive: meta.isLive ?? false,
+            width: meta.width,
+            height: meta.height
+          }
+        ]);
+      }
+    }
+  } catch {
+    // Best-effort enrichment
+  }
+}
+
 async function inspectHlsVariants(url) {
   const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) {
@@ -255,6 +426,28 @@ async function inspectHlsVariants(url) {
   }
   const text = await res.text();
   const parsed = parseM3u8(text, res.url || url);
+
+  if (parsed.type === 'master' && parsed.variants.length > 0) {
+    let totalDuration = 0;
+    let isLive = false;
+    try {
+      const subParsed = await fetchM3u8(parsed.variants[0].url);
+      if (subParsed && subParsed.type === 'media') {
+        totalDuration = subParsed.totalDuration || 0;
+        isLive = Boolean(subParsed.isLive);
+      }
+    } catch {
+      // Ignore variant duration lookup failure
+    }
+
+    parsed.totalDuration = totalDuration;
+    parsed.isLive = isLive;
+    parsed.variants = parsed.variants.map((v) => ({
+      ...v,
+      estimatedSizeBytes: isLive ? null : estimateHlsBytes(v.bandwidth, totalDuration)
+    }));
+  }
+
   return parsed;
 }
 
@@ -339,20 +532,23 @@ chrome.webRequest.onHeadersReceived.addListener(
 
     if (!classified) return;
 
-    upsertTabMedia(details.tabId, [
-      {
-        id: `${classified.kind}_${classified.dedupeKey}`,
-        url: details.url,
-        dedupeKey: classified.dedupeKey,
-        kind: classified.kind,
-        ext: classified.ext,
-        formatLabel: classified.formatLabel,
-        mimeType: classified.mimeType,
-        sizeBytes: classified.sizeBytes,
-        source: 'network',
-        detectedAt: Date.now()
-      }
-    ]).catch(() => {});
+    const item = {
+      id: `${classified.kind}_${classified.dedupeKey}`,
+      url: details.url,
+      dedupeKey: classified.dedupeKey,
+      kind: classified.kind,
+      ext: classified.ext,
+      formatLabel: classified.formatLabel,
+      mimeType: classified.mimeType,
+      sizeBytes: classified.sizeBytes,
+      source: 'network',
+      detectedAt: Date.now()
+    };
+
+    upsertTabMedia(details.tabId, [item]).catch(() => {});
+    if (item.sizeBytes == null) {
+      enrichItemSize(details.tabId, item).catch(() => {});
+    }
   },
   {
     urls: ['<all_urls>'],
@@ -435,6 +631,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           lastMainUrl: sender.tab?.url || undefined
         });
 
+        for (const item of items) {
+          if (item.sizeBytes == null && item.estimatedSizeBytes == null) {
+            enrichItemSize(tabId, item).catch(() => {});
+          }
+        }
+
         sendResponse({ ok: true });
         return;
       }
@@ -503,6 +705,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           await upsertTabMedia(tabId, mergedItems, mergedMeta);
+          for (const item of mergedItems) {
+            if (item.sizeBytes == null && item.estimatedSizeBytes == null) {
+              enrichItemSize(tabId, item).catch(() => {});
+            }
+          }
           sendResponse({ ok: true, frames: frameResults?.length || 0 });
         } catch (err) {
           sendResponse({ ok: false, error: err?.message || 'Cannot scan restricted page.' });
