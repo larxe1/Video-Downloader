@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>Free Video Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <img src="../icons/icon-48.png" alt="" width="24" height="24" class="brand-icon">
+      <div class="brand-text">
+        <h1>Video Downloader</h1>
+        <p id="video-count" class="subtitle">Checking page…</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button type="button" id="rescan-btn" class="btn btn-secondary btn-sm">Rescan</button>
+      <button type="button" id="clear-btn" class="btn btn-ghost btn-sm">Clear</button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <section id="jobs-section" class="section" aria-labelledby="jobs-heading" hidden>
+      <div class="section-header">
+        <h2 id="jobs-heading">Stream Downloads</h2>
+        <button type="button" id="clear-jobs-btn" class="btn btn-ghost btn-xs">Clear finished</button>
+      </div>
+      <ul id="jobs-list" class="card-list"></ul>
+    </section>
+
+    <section class="section" aria-labelledby="videos-heading">
+      <h2 id="videos-heading" class="visually-hidden">Detected videos on this tab</h2>
+      <ul id="videos-list" class="card-list"></ul>
+
+      <div id="empty-state" class="empty-state" hidden>
+        <svg aria-hidden="true" class="empty-icon" viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="3"></rect>
+          <polygon points="10,9 16,12 10,15" fill="currentColor" stroke="none"></polygon>
+        </svg>
+        <p id="empty-title" class="empty-title">No videos detected on this tab yet</p>
+        <p id="empty-desc" class="empty-desc">
+          Start playing the video for a couple of seconds, then click <strong>Rescan</strong>.
+        </p>
+      </div>
+    </section>
+
+    <details class="settings-disclosure">
+      <summary>Download settings</summary>
+      <div class="settings-body">
+        <label class="checkbox-row" for="opt-subfolder">
+          <input type="checkbox" id="opt-subfolder">
+          <span>Save inside <code>Downloads/Video Downloader</code></span>
+        </label>
+        <label class="checkbox-row" for="opt-save-as">
+          <input type="checkbox" id="opt-save-as">
+          <span>Ask where to save each file</span>
+        </label>
+      </div>
+    </details>
+  </main>
+
+  <footer class="app-footer">
+    <p id="status-message" class="status-text" aria-live="polite">Ready</p>
+    <span class="free-tag">100% Free · Local</span>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
